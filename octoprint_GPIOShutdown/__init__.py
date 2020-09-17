@@ -24,6 +24,7 @@ class GpioshutdownPlugin(
 
 	def initialize(self):
 		self.activated = 0
+		self.last_restart_pin = -1
 		self.last_shutdown_pin = -1
 		self.last_led_pin = -1
 		self._logger.info("Running RPi.GPIO version '{0}'".format(GPIO.VERSION))
@@ -37,6 +38,10 @@ class GpioshutdownPlugin(
 
 	def on_shutdown(self):
 		self._shutdown_sensor()
+
+	@property
+	def pin_restart(self):
+		return int(self._settings.get(["pin_restart"]))
 
 	@property
 	def pin_shutdown(self):
@@ -54,15 +59,17 @@ class GpioshutdownPlugin(
 		return [dict(type="settings", custom_bindings=False)]
 
 	def _setup_sensor(self):
+		self.cleanup_last_channel(self.last_restart_pin)
 		self.cleanup_last_channel(self.last_shutdown_pin)
 		self.cleanup_last_channel(self.last_led_pin)
 
-		if self.shutdown_pin_enabled() or self.led_pin_enabled():
+		if self.shutdown_pin_enabled() or self.restart_pin_enabled() or self.led_pin_enabled():
 			try:
 				GPIO.setmode(GPIO.BCM)
 			except:
 				pass
 
+		self.last_restart_pin = self.pin_restart
 		self.last_shutdown_pin = self.pin_shutdown
 		self.last_led_pin = self.pin_led
 
@@ -71,6 +78,13 @@ class GpioshutdownPlugin(
 			GPIO.add_event_detect(
 						self.pin_shutdown, GPIO.BOTH,
 						callback=self.sensor_callback,
+						bouncetime=self.bounce
+						)
+		if self.restart_pin_enabled():
+			GPIO.setup(self.pin_restart, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+			GPIO.add_event_detect(
+						self.pin_restart, GPIO.BOTH,
+						callback=self.sensor_callback_restart,
 						bouncetime=self.bounce
 						)
 
@@ -109,6 +123,19 @@ class GpioshutdownPlugin(
 				os.system("sudo shutdown -h now")
 			except:
 				e = sys.exc_info()[0]
+				self._logger.exception("Error executing shutdown command")			
+
+	def sensor_callback_restart(self, _):
+		sleep(self.bounce/1000)
+		if self.activated==1:
+			return
+		if self._printer.get_state_id() != "PRINTING" and self._printer.is_printing() == False:
+			self.activated = 1
+			self._logger.info("Sensor triggered!")
+			try:
+				os.system("sudo shutdown -r now")
+			except:
+				e = sys.exc_info()[0]
 				self._logger.exception("Error executing shutdown command")
 
 
@@ -116,7 +143,8 @@ class GpioshutdownPlugin(
 
 	def get_settings_defaults(self):
 		return dict(
-			pin_shutdown	= -1,   # Default is no pin
+			pin_restart		= -1,   # Default is no pin
+			pin_shutdown		= -1,   # Default is no pin
 			pin_led			= -1,   # Default is no pin
 			bounce			= 250,  # Debounce 250ms
 		)
@@ -124,6 +152,9 @@ class GpioshutdownPlugin(
 	def on_settings_save(self, data):
 		octoprint.plugin.SettingsPlugin.on_settings_save(self, data)
 		self._setup_sensor()
+
+	def restart_pin_enabled(self):
+		return self.pin_restart != -1
 
 	def shutdown_pin_enabled(self):
 		return self.pin_shutdown != -1
